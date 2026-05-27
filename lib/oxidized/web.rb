@@ -119,9 +119,11 @@ module Oxidized
         min_threads = @configuration[:min_threads]
         max_threads = @configuration[:max_threads]
         @thread = Thread.new do
-          @server = Puma::Server.new @app
-          @server.min_threads = min_threads
-          @server.max_threads = max_threads
+          # Thread pool counts must be passed to the constructor; Puma::Server
+          # exposes min_threads / max_threads as read-only accessors in Puma 6+.
+          @server = Puma::Server.new @app, nil,
+                                     min_threads: min_threads,
+                                     max_threads: max_threads
           addr = @configuration[:addr]
           port = @configuration[:port]
           @server.add_tcp_listener addr, port
