@@ -46,15 +46,16 @@ module Oxidized
         order_col  = (params.dig('order', '0', 'column') || params.dig(:order, :'0', :column)).to_i
         order_dir  = (params.dig('order', '0', 'dir')    || params.dig(:order, :'0', :dir) || 'asc').to_s
 
-        all_nodes = nodes.list.map do |node|
-          node[:status] = 'never'
-          node[:time]   = 'never'
-          node[:group]  = 'default' unless node[:group]
-          if node[:last]
-            node[:status] = node[:last][:status]
-            node[:time]   = node[:last][:end]
-          end
-          node
+        # Use the node list cache so that Nodes#list (which serialises every
+        # node while holding the global mutex) is not called on every AJAX
+        # request.  We merge rather than mutate so the cached hashes are never
+        # modified by concurrent requests.
+        all_nodes = node_list_cache.list.map do |node|
+          node.merge(
+            status: node[:last] ? node[:last][:status] : 'never',
+            time:   node[:last] ? node[:last][:end]    : 'never',
+            group:  node[:group] || 'default'
+          )
         end
 
         records_total = all_nodes.count
@@ -176,6 +177,8 @@ module Oxidized
       get '/reload.?:format?' do
         node = params[:node]
         node ? (nodes.load node) : nodes.load
+        # Discard the cached node list so the next request reflects the reload
+        node_list_cache.invalidate!
         @data = node ? "reloaded #{node}" : 'reloaded list of nodes'
         out
       end
@@ -332,6 +335,10 @@ module Oxidized
 
       def nodes
         settings.nodes
+      end
+
+      def node_list_cache
+        settings.node_list_cache
       end
 
       # checks if param ends with .json
