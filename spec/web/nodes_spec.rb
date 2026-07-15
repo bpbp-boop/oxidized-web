@@ -215,6 +215,17 @@ describe Oxidized::API::WebApp do
       _(result['recordsTotal']).must_equal 2
       _(result['data'].map { |n| n['model'] }.uniq).must_equal ['aos']
     end
+
+    it 'treats an empty group filter as no filter' do
+      get '/nodes/datatables', {
+        draw: '1', start: '0', length: '20', group: '',
+        'search[value]' => '',
+        'order[0][column]' => '0', 'order[0][dir]' => 'asc'
+      }
+
+      result = JSON.parse(last_response.body)
+      _(result['recordsTotal']).must_equal 6
+    end
   end
 end
 
@@ -377,6 +388,28 @@ describe 'Oxidized::API::WebApp server-side views' do
     _(row['total_runs']).must_equal 10
     _(row['failures']).must_equal 1
     _(row['status']).must_equal 'success'
+  end
+
+  it 'searches stats across the status column, not just the name' do
+    get '/nodes/stats/datatables', {
+      draw: '1', start: '0', length: '20',
+      'search[value]' => 'no_connection',
+      'order[0][column]' => '0', 'order[0][dir]' => 'asc'
+    }
+
+    result = JSON.parse(last_response.body)
+    _(result['recordsFiltered']).must_be :>, 0
+    _(result['data'].map { |r| r['status'] }.uniq).must_equal ['no_connection']
+  end
+
+  it 'returns /nodes/stats.json keyed by node name' do
+    get '/nodes/stats.json'
+
+    _(last_response.ok?).must_equal true
+    result = JSON.parse(last_response.body)
+    _(result).must_be_kind_of Hash
+    _(result.keys.sort).must_equal %w[sw1 sw2 sw3]
+    _(result['sw1']['total_runs']).must_equal 10
   end
 
   it 'finds nodes whose config matches the search' do

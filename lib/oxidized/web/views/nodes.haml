@@ -198,22 +198,26 @@
         /* 7 – Actions (not sortable or searchable) */
         { data: null, orderable: false, searchable: false,
           render: function(data, type, row) {
-            /* full_name is "<group>/<name>"; the "/" is part of the route so
-             * we HTML-escape rather than percent-encode it */
-            var fn = oxEscHtml(row.full_name);
+            /* full_name is "<group>/<name>". For the path-based fetch/next
+             * routes the "/" is a real separator, so we only HTML-escape it.
+             * For the version link the value goes into a query-string param, so
+             * it must be percent-encoded (otherwise a "&" in the name would
+             * truncate node_full). */
+            var fnPath  = oxEscHtml(row.full_name);
+            var fnQuery = encodeURIComponent(row.full_name);
             return '<a class="link-body-emphasis link-underline-opacity-0"'
                    + ' title="Configuration"'
-                   + ' href="' + oxBaseUrl + 'node/fetch/' + fn + '">'
+                   + ' href="' + oxBaseUrl + 'node/fetch/' + fnPath + '">'
                    + '<i class="bi bi-cloud-download"></i></a>'
                    + '&nbsp;&nbsp;'
                    + '<a class="link-body-emphasis link-underline-opacity-0"'
                    + ' title="Versions"'
-                   + ' href="' + oxBaseUrl + 'node/version?node_full=' + fn + '">'
+                   + ' href="' + oxBaseUrl + 'node/version?node_full=' + fnQuery + '">'
                    + '<i class="bi bi-stack"></i></a>'
                    + '&nbsp;&nbsp;'
                    + '<a class="link-body-emphasis link-underline-opacity-0"'
                    + ' title="Update configuration"'
-                   + ' href="' + oxBaseUrl + 'node/next/' + fn + '">'
+                   + ' href="' + oxBaseUrl + 'node/next/' + fnPath + '">'
                    + '<i class="bi bi-repeat"></i></a>';
           }
         },

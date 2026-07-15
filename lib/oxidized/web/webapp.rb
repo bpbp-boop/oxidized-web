@@ -55,9 +55,11 @@ module Oxidized
         # Optional base filter by group or model, applied before search and
         # pagination.  enrich_node normalises a missing group to "default", so
         # a plain equality check also matches ungrouped nodes for group=default.
-        if (group = params[:group])
+        # A present-but-empty value (e.g. "?group=") is treated as "no filter"
+        # rather than "match the empty group", which would return nothing.
+        if (group = params[:group]) && !group.empty?
           all_nodes = all_nodes.select { |node| node[:group].to_s == group }
-        elsif (model = params[:model])
+        elsif (model = params[:model]) && !model.empty?
           all_nodes = all_nodes.select { |node| node[:model].to_s == model }
         end
 
@@ -108,7 +110,11 @@ module Oxidized
 
         unless dt[:search].empty?
           s = dt[:search].downcase
-          rows = rows.select { |row| row[:name].to_s.downcase.include?(s) }
+          rows = rows.select do |row|
+            %i[name status total_runs failures failure_rate avg_time].any? do |f|
+              row[f].to_s.downcase.include?(s)
+            end
+          end
         end
         records_filtered = rows.count
 
@@ -193,7 +199,12 @@ module Oxidized
 
       get '/nodes/stats.?:format?' do
         if params[:format] == 'json'
-          @data = stats_cache.rows.map { |row| serialize_stats_row(row) }
+          # Keep the top-level shape a JSON object keyed by node name (as the
+          # previous implementation did) so existing consumers can still index
+          # by node name; the per-node value is now a structured summary.
+          @data = stats_cache.rows.each_with_object({}) do |row, acc|
+            acc[row[:name].to_s] = serialize_stats_row(row)
+          end
           json @data
         else
           # HTML view: server-side DataTables, data loaded via AJAX from
@@ -458,6 +469,12 @@ module Oxidized
       # or an encoding mismatch) is contained so a single bad node can no longer
       # abort the whole search.
       def search_configs(regex)
+        # Snapshot the node list without taking the global nodes mutex.  #to_a
+        # is an atomic copy under MRI's GVL, so at worst the snapshot may miss
+        # or duplicate a single node that the scheduler is rotating at that
+        # instant — acceptable for a search, and a deliberate trade-off to avoid
+        # serialising the whole (potentially very large) search on the lock that
+        # the device poller needs.
         node_objs = nodes.respond_to?(:to_a) ? nodes.to_a : nodes.list
         parallel_map(node_objs, CONF_SEARCH_THREADS) do |node|
           config = fetch_config_for_search(node)
