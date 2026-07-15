@@ -76,6 +76,114 @@ module Oxidized
       end
     end
 
+    # Thread-safe cache for the derived per-node statistics shown on
+    # /nodes/stats.
+    #
+    # The stats page used to iterate every node and compute its summary row in
+    # the view template on every request, then render one HTML <tr> per host.
+    # With tens-of-thousands of hosts that is both slow to compute and lethal
+    # for the browser to render.  This cache keeps a snapshot of the computed
+    # rows so the /nodes/stats/datatables endpoint can filter, sort and
+    # paginate them cheaply (and only ship one page to the browser).
+    #
+    # Like NodeListCache the snapshot is refreshed at most once per TTL window
+    # and can be invalidated explicitly (e.g. on /reload).
+    class StatsCache
+      include SemanticLogger::Loggable
+
+      DEFAULT_TTL = 10
+
+      def initialize(nodes, ttl: DEFAULT_TTL)
+        @nodes      = nodes
+        @ttl        = ttl
+        @mutex      = Mutex.new
+        @data       = nil
+        @fetched_at = Time.at(0)
+      end
+
+      def rows
+        @mutex.synchronize do
+          if stale?
+            logger.debug "Stats cache miss — recomputing (ttl=#{@ttl}s)"
+            @data       = @nodes.to_a.map { |node| self.class.build_row(node.name, node.stats) }
+            @fetched_at = Time.now
+          end
+          @data
+        end
+      end
+
+      def invalidate!
+        @mutex.synchronize do
+          logger.debug "Stats cache invalidated"
+          @data       = nil
+          @fetched_at = Time.at(0)
+        end
+      end
+
+      # Compute a single summary row from a node's Stats object.  Mirrors the
+      # logic that previously lived in views/stats.haml, but returns plain data
+      # (Times / numbers) so the endpoint can sort and format it.
+      def self.build_row(name, stats)
+        successes = stats.successes
+        failures  = stats.failures
+
+        last_success, avg_success_time = summarise(stats.get(:success), successes)
+        last_failure, avg_failure_time = summarise(stats.get(:no_connection), failures)
+
+        avg_time = if avg_success_time.positive? && avg_failure_time.positive?
+                     (avg_success_time + avg_failure_time) / 2
+                   elsif avg_success_time.positive?
+                     avg_success_time
+                   elsif avg_failure_time.positive?
+                     avg_failure_time
+                   else
+                     0.0
+                   end
+
+        status = if last_success && last_failure
+                   last_success > last_failure ? 'success' : 'no_connection'
+                 elsif last_success
+                   'success'
+                 else
+                   'no_connection'
+                 end
+
+        total_runs   = successes + failures
+        failure_rate = total_runs.zero? ? 0.0 : (failures / total_runs.to_f) * 100
+        row_class    = ''
+        row_class    = 'warning' if failure_rate >= 50
+        row_class    = 'danger'  if failure_rate >= 75
+
+        {
+          name: name,
+          total_runs: total_runs,
+          failures: failures,
+          failure_rate: failure_rate,
+          avg_time: avg_time,
+          status: status,
+          last_success: last_success,
+          last_failure: last_failure,
+          row_class: row_class
+        }
+      end
+
+      # Given a Stats history array and its counter, return the timestamp of the
+      # most recent entry and the average run time over the retained history.
+      def self.summarise(history, counter)
+        return [nil, 0.0] if Array(history).empty?
+
+        last_time = history.last[:end]
+        avg = counter.positive? ? (history.sum { |x| x[:time].to_f } / counter) : 0.0
+        [last_time, avg]
+      end
+
+      private
+
+      def stale?
+        @data.nil? || (Time.now - @fetched_at) > @ttl
+      end
+    end
+
     class Web
       include SemanticLogger::Loggable
 
@@ -100,9 +208,14 @@ module Oxidized
           nodes,
           ttl: @configuration[:node_cache_ttl]
         )
+        stats_cache = StatsCache.new(
+          nodes,
+          ttl: @configuration[:node_cache_ttl]
+        )
 
         WebApp.set :nodes,           nodes
         WebApp.set :node_list_cache, cache
+        WebApp.set :stats_cache,     stats_cache
         WebApp.set :configuration,   @configuration
         WebApp.set :host_authorization, {
           permitted_hosts: @configuration[:vhosts]
@@ -151,14 +264,14 @@ module Oxidized
         end
         hide_node_vars = hide_node_vars.map(&:to_sym)
         {
-          addr:            configuration.listen?     || DEFAULT_HOST,
-          port:            configuration.port?       || DEFAULT_PORT,
-          uri_prefix:      normalize_uri(configuration.url_prefix? || DEFAULT_URI_PREFIX),
-          vhosts:          configuration.vhosts?     || [],
-          hide_node_vars:  hide_node_vars,
-          node_cache_ttl:  (configuration.node_cache_ttl? || NodeListCache::DEFAULT_TTL).to_i,
-          min_threads:     (configuration.min_threads?    || DEFAULT_MIN_THREADS).to_i,
-          max_threads:     (configuration.max_threads?    || DEFAULT_MAX_THREADS).to_i
+          addr: configuration.listen?     || DEFAULT_HOST,
+          port: configuration.port?       || DEFAULT_PORT,
+          uri_prefix: normalize_uri(configuration.url_prefix? || DEFAULT_URI_PREFIX),
+          vhosts: configuration.vhosts? || [],
+          hide_node_vars: hide_node_vars,
+          node_cache_ttl: (configuration.node_cache_ttl? || NodeListCache::DEFAULT_TTL).to_i,
+          min_threads: (configuration.min_threads?    || DEFAULT_MIN_THREADS).to_i,
+          max_threads: (configuration.max_threads?    || DEFAULT_MAX_THREADS).to_i
         }
       end
 
@@ -171,14 +284,14 @@ module Oxidized
           addr = nil
         end
         {
-          addr:            addr,
-          port:            port.to_i,
-          uri_prefix:      normalize_uri(uri_prefix || DEFAULT_URI_PREFIX),
-          vhosts:          [],
-          hide_node_vars:  [],
-          node_cache_ttl:  NodeListCache::DEFAULT_TTL,
-          min_threads:     DEFAULT_MIN_THREADS,
-          max_threads:     DEFAULT_MAX_THREADS
+          addr: addr,
+          port: port.to_i,
+          uri_prefix: normalize_uri(uri_prefix || DEFAULT_URI_PREFIX),
+          vhosts: [],
+          hide_node_vars: [],
+          node_cache_ttl: NodeListCache::DEFAULT_TTL,
+          min_threads: DEFAULT_MIN_THREADS,
+          max_threads: DEFAULT_MAX_THREADS
         }
       end
 

@@ -1,38 +1,40 @@
 .row
   .col-8
     %h4
-      %a{href: url_for('/nodes')} nodes
-      \/ Nodes that contain 
+      %a.link-body-emphasis.link-underline-opacity-0{href: url_for('/nodes')} nodes
+      \/ Nodes that contain
       %b
-        &= "#{@to_research}"
+        &= "#{@search_term}"
   .col-4
     %form.float-end#oxButtons
       %button.btn.btn-primary{type: 'button', onclick: 'history.go();'}
         %i.bi.bi-arrow-clockwise
         Refresh page
 
-.row
-  .table-responsive
-    %table.table.table-sm.table-striped.table-hover#versionsTable
-      %thead
-        %tr
-          %th Name
-          %th Configuration
-
-      %tbody
-        - @nodes_match.each do |x|
+- if @error
+  .alert.alert-danger&= @error
+- else
+  .row
+    .table-responsive
+      %table.table.table-sm.table-striped.table-hover#versionsTable
+        %thead
           %tr
-            %td #{x[:node]}
-            %td
-              %a{title: 'configuration',
-                 href: url_for("/node/fetch/#{x[:full_name]}")}
-                %i.bi.bi-cloud-download
+            %th Name
+            %th Configuration
 
-:javascript
-  $(function() {
-    $('#versionsTable').dataTable({
-      autoWidth: false,
-      "order": [[0, "asc"]]
+        %tbody
+          - @nodes_match.each do |x|
+            %tr
+              %td #{x[:node]}
+              %td
+                %a{title: 'configuration',
+                   href: url_for("/node/fetch/#{x[:full_name]}")}
+                  %i.bi.bi-cloud-download
+
+  :javascript
+    $(function() {
+      $('#versionsTable').dataTable({
+        autoWidth: false,
+        "order": [[0, "asc"]]
+      });
     });
-  });
-

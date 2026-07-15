@@ -34,35 +34,38 @@ module Oxidized
       #   order[0][column] - index of the column to sort by (0-based)
       #   order[0][dir]    - sort direction: "asc" or "desc"
       #
+      # Optional base filters (used by the /nodes/group/<x> and
+      # /nodes/model/<x> pages so those views are paginated server-side too,
+      # instead of rendering every matching host into the HTML):
+      #   group  - only return nodes in this group ("default" == ungrouped)
+      #   model  - only return nodes of this model
+      #
       # Returns JSON in the DataTables server-side format:
       #   { draw, recordsTotal, recordsFiltered, data: [...] }
       get '/nodes/datatables' do
         content_type :json
-
-        draw       = params[:draw].to_i
-        start_idx  = params[:start].to_i
-        length     = params[:length].to_i
-        search_val = (params.dig('search', 'value') || params.dig(:search, :value)).to_s
-        order_col  = (params.dig('order', '0', 'column') || params.dig(:order, :'0', :column)).to_i
-        order_dir  = (params.dig('order', '0', 'dir')    || params.dig(:order, :'0', :dir) || 'asc').to_s
+        dt = datatables_params
 
         # Use the node list cache so that Nodes#list (which serialises every
         # node while holding the global mutex) is not called on every AJAX
-        # request.  We merge rather than mutate so the cached hashes are never
-        # modified by concurrent requests.
-        all_nodes = node_list_cache.list.map do |node|
-          node.merge(
-            status: node[:last] ? node[:last][:status] : 'never',
-            time:   node[:last] ? node[:last][:end]    : 'never',
-            group:  node[:group] || 'default'
-          )
+        # request.  #enrich_node merges rather than mutates so the cached
+        # hashes are never modified by concurrent requests.
+        all_nodes = node_list_cache.list.map { |node| enrich_node(node) }
+
+        # Optional base filter by group or model, applied before search and
+        # pagination.  enrich_node normalises a missing group to "default", so
+        # a plain equality check also matches ungrouped nodes for group=default.
+        if (group = params[:group])
+          all_nodes = all_nodes.select { |node| node[:group].to_s == group }
+        elsif (model = params[:model])
+          all_nodes = all_nodes.select { |node| node[:model].to_s == model }
         end
 
         records_total = all_nodes.count
 
         # Apply global search across the visible text columns
-        unless search_val.empty?
-          s = search_val.downcase
+        unless dt[:search].empty?
+          s = dt[:search].downcase
           all_nodes = all_nodes.select do |node|
             %i[name ip model group status].any? { |f| node[f].to_s.downcase.include?(s) }
           end
@@ -72,61 +75,87 @@ module Oxidized
 
         # Sort – use numeric comparison for time columns, string for the rest
         col_fields = %i[name ip model group status time mtime]
-        sort_field = col_fields[order_col] || :name
+        sort_field = col_fields[dt[:order_col]] || :name
         sorted = if %i[time mtime].include?(sort_field)
                    all_nodes.sort_by { |node| node[sort_field].is_a?(Time) ? node[sort_field].to_i : 0 }
                  else
                    all_nodes.sort_by { |node| node[sort_field].to_s.downcase }
                  end
-        sorted.reverse! if order_dir == 'desc'
+        sorted.reverse! if dt[:order_dir] == 'desc'
 
         # Paginate (length == -1 means "all records")
-        page_data = length == -1 ? sorted : (sorted.slice(start_idx, length) || [])
+        page_data = dt[:length] == -1 ? sorted : (sorted.slice(dt[:start], dt[:length]) || [])
 
         json(
-          draw:            draw,
-          recordsTotal:    records_total,
+          draw: dt[:draw],
+          recordsTotal: records_total,
           recordsFiltered: records_filtered,
-          data:            page_data.map do |node|
-            {
-              name:      node[:name].to_s,
-              full_name: (node[:full_name] || node[:name]).to_s,
-              ip:        node[:ip].to_s,
-              model:     node[:model].to_s,
-              group:     node[:group].to_s,
-              status:    node[:status].to_s,
-              time:      node[:time].is_a?(Time)  ? node[:time].to_i  : 0,
-              mtime:     node[:mtime].is_a?(Time) ? node[:mtime].to_i : 0
-            }
+          data: page_data.map { |node| serialize_node_for_table(node) }
+        )
+      end
+
+      # Server-side DataTables endpoint for the /nodes/stats page.
+      #
+      # Defined *before* /nodes/:filter/* so that "stats" is not swallowed as a
+      # filter name.  Uses the stats cache so the per-node summary rows are
+      # computed at most once per TTL window rather than on every AJAX request.
+      get '/nodes/stats/datatables' do
+        content_type :json
+        dt = datatables_params
+
+        rows = stats_cache.rows
+        records_total = rows.count
+
+        unless dt[:search].empty?
+          s = dt[:search].downcase
+          rows = rows.select { |row| row[:name].to_s.downcase.include?(s) }
+        end
+        records_filtered = rows.count
+
+        col_fields = %i[name total_runs failures failure_rate avg_time status last_success last_failure]
+        sort_field = col_fields[dt[:order_col]] || :name
+        sorted =
+          case sort_field
+          when :last_success, :last_failure
+            rows.sort_by { |row| row[sort_field].is_a?(Time) ? row[sort_field].to_i : 0 }
+          when :total_runs, :failures, :failure_rate, :avg_time
+            rows.sort_by { |row| row[sort_field].to_f }
+          else
+            rows.sort_by { |row| row[sort_field].to_s.downcase }
           end
+        sorted.reverse! if dt[:order_dir] == 'desc'
+
+        page_data = dt[:length] == -1 ? sorted : (sorted.slice(dt[:start], dt[:length]) || [])
+
+        json(
+          draw: dt[:draw],
+          recordsTotal: records_total,
+          recordsFiltered: records_filtered,
+          data: page_data.map { |row| serialize_stats_row(row) }
         )
       end
 
       # :filter can be "group" or "model"
       # URL: /nodes/group/<GroupName>[.json]
       # URL: /nodes/model/<ModelName>[.json]
-      # an optional .json extension returns the data as JSON
+      #
+      # HTML: renders the standard nodes table in server-side mode, pushing the
+      #   filter down to /nodes/datatables so only one page of matching hosts is
+      #   ever loaded – large groups/models no longer send every row.
+      # .json: returns the full filtered list (unchanged, for API consumers).
       #
       # as GroupName can include /, we use splat to match its value
       # and extract the optional ".json" with route_parse
       get '/nodes/:filter/*' do
         value, @json = route_parse params[:splat].first
-        @data = nodes.list.select do |node|
-          next unless node[params[:filter].to_sym] == value ||
-                      (
-                        params[:filter].to_sym == :group &&
-                        node[params[:filter].to_sym].nil? &&
-                        value.to_sym == :default
-                      )
+        filter = params[:filter]
 
-          node[:status] = 'never'
-          node[:time]   = 'never'
-          node[:group]  = 'default' unless node[:group]
-          if node[:last]
-            node[:status] = node[:last][:status]
-            node[:time]   = node[:last][:end]
-          end
-          node
+        if @json || params[:format] == 'json'
+          @data = filtered_nodes(filter, value)
+        else
+          @server_side  = true
+          @filter_type  = filter
+          @filter_value = value
         end
         out :nodes
       end
@@ -134,16 +163,7 @@ module Oxidized
       get '/nodes.?:format?' do
         if params[:format] == 'json'
           # JSON consumers (scripts, API clients) still get the full list
-          @data = nodes.list.map do |node|
-            node[:status] = 'never'
-            node[:time]   = 'never'
-            node[:group]  = 'default' unless node[:group]
-            if node[:last]
-              node[:status] = node[:last][:status]
-              node[:time]   = node[:last][:end]
-            end
-            node
-          end
+          @data = node_list_cache.list.map { |node| enrich_node(node) }
         else
           # HTML view: use server-side DataTables so only one page of data is
           # fetched per request.  The actual data is loaded via AJAX by the
@@ -154,31 +174,41 @@ module Oxidized
       end
 
       post '/nodes/conf_search.?:format?' do
-        @to_research = Regexp.new params[:search_in_conf_textbox]
-        nodes_list = nodes.list.map
-        @nodes_match = []
-        nodes_list.each do |n|
-          node, @json = route_parse n[:name]
-          config = nodes.fetch node, n[:group]
-          @nodes_match.push({ node: n[:name], full_name: n[:full_name] }) if config[@to_research]
+        @search_term = params[:search_in_conf_textbox].to_s
+        begin
+          @to_research = Regexp.new(@search_term)
+        rescue RegexpError => e
+          # A malformed regular expression used to raise and return a 500;
+          # show the operator a friendly message instead.
+          @error       = "Invalid search expression: #{e.message}"
+          @nodes_match = []
+          @data        = @nodes_match
+          return out(:conf_search)
         end
-        @data = @nodes_match
+
+        @nodes_match = search_configs(@to_research)
+        @data        = @nodes_match
         out :conf_search
       end
 
       get '/nodes/stats.?:format?' do
-        @data = {}
-        nodes.each do |node|
-          @data[node.name] = node.stats
+        if params[:format] == 'json'
+          @data = stats_cache.rows.map { |row| serialize_stats_row(row) }
+          json @data
+        else
+          # HTML view: server-side DataTables, data loaded via AJAX from
+          # /nodes/stats/datatables one page at a time.
+          @server_side = true
+          out :stats
         end
-        out :stats
       end
 
       get '/reload.?:format?' do
         node = params[:node]
         node ? (nodes.load node) : nodes.load
-        # Discard the cached node list so the next request reflects the reload
+        # Discard the cached data so the next request reflects the reload
         node_list_cache.invalidate!
+        stats_cache.invalidate!
         @data = node ? "reloaded #{node}" : 'reloaded list of nodes'
         out
       end
@@ -316,6 +346,11 @@ module Oxidized
       HTML_ESCAPE = { '&' => '&amp;', '<' => '&lt;', '>' => '&gt;', '"' => '&quot;', "'" => '&#39;' }.freeze
       HTML_ESCAPE_ONCE_REGEX = /['"><]|&(?!(?:[a-zA-Z]+|#(?:\d+|[xX][0-9a-fA-F]+));)/
 
+      # Number of worker threads used to read node configurations concurrently
+      # during a config search.  Reading a config is I/O bound (git/disk), so
+      # several threads dramatically cut the wall-clock time on large repos.
+      CONF_SEARCH_THREADS = 16
+
       private
 
       def out(template = :text)
@@ -339,6 +374,180 @@ module Oxidized
 
       def node_list_cache
         settings.node_list_cache
+      end
+
+      def stats_cache
+        settings.stats_cache
+      end
+
+      # Extract and normalise the standard DataTables server-side parameters.
+      def datatables_params
+        {
+          draw: params[:draw].to_i,
+          start: params[:start].to_i,
+          length: params[:length].to_i,
+          search: (params.dig('search', 'value') || params.dig(:search, :value)).to_s,
+          order_col: (params.dig('order', '0', 'column') || params.dig(:order, :'0', :column)).to_i,
+          order_dir: (params.dig('order', '0', 'dir') || params.dig(:order, :'0', :dir) || 'asc').to_s
+        }
+      end
+
+      # Return a copy of a serialized node hash with the derived display fields
+      # (status, time, group) filled in.  Never mutates the input so cached
+      # hashes stay pristine across concurrent requests.
+      def enrich_node(node)
+        node.merge(
+          status: node[:last] ? node[:last][:status] : 'never',
+          time: node[:last] ? node[:last][:end] : 'never',
+          group: node[:group] || 'default'
+        )
+      end
+
+      # Nodes matching a "group"/"model" filter, enriched for display/JSON.
+      def filtered_nodes(filter, value)
+        key = filter.to_sym
+        node_list_cache.list.each_with_object([]) do |node, acc|
+          matches = node[key].to_s == value ||
+                    (key == :group && node[:group].nil? && value == 'default')
+          acc << enrich_node(node) if matches
+        end
+      end
+
+      def serialize_node_for_table(node)
+        {
+          name: node[:name].to_s,
+          full_name: (node[:full_name] || node[:name]).to_s,
+          ip: node[:ip].to_s,
+          model: node[:model].to_s,
+          group: node[:group].to_s,
+          status: node[:status].to_s,
+          time: node[:time].is_a?(Time) ? node[:time].to_i : 0,
+          mtime: node[:mtime].is_a?(Time) ? node[:mtime].to_i : 0
+        }
+      end
+
+      def serialize_stats_row(row)
+        {
+          name: row[:name].to_s,
+          total_runs: row[:total_runs],
+          failures: row[:failures],
+          failure_rate: row[:failure_rate],
+          avg_time: row[:avg_time],
+          status: row[:status].to_s,
+          last_success: row[:last_success].is_a?(Time) ? row[:last_success].to_i : 0,
+          last_failure: row[:last_failure].is_a?(Time) ? row[:last_failure].to_i : 0,
+          row_class: row[:row_class].to_s
+        }
+      end
+
+      # Build the AJAX URL for the nodes DataTable, pushing any active
+      # group/model filter down to the server-side endpoint.  The filter value
+      # is percent-encoded so it is safe to embed verbatim in a JS string.
+      def nodes_datatables_url
+        base = url_for('/nodes/datatables')
+        case @filter_type
+        when 'group' then "#{base}?group=#{Rack::Utils.escape(@filter_value)}"
+        when 'model' then "#{base}?model=#{Rack::Utils.escape(@filter_value)}"
+        else base
+        end
+      end
+
+      # Search every node's stored configuration for +regex+ and return the
+      # matches as [{ node:, full_name: }, ...].  Fetches run concurrently and
+      # every per-node failure (missing config, unsupported output, binary data
+      # or an encoding mismatch) is contained so a single bad node can no longer
+      # abort the whole search.
+      def search_configs(regex)
+        node_objs = nodes.respond_to?(:to_a) ? nodes.to_a : nodes.list
+        parallel_map(node_objs, CONF_SEARCH_THREADS) do |node|
+          config = fetch_config_for_search(node)
+          next nil unless config_matches?(regex, config)
+
+          { node: node_name_of(node), full_name: node_full_name_of(node) }
+        end.compact
+      end
+
+      # Fetch a node's config without taking the global nodes mutex (which
+      # Nodes#fetch would hold for the whole disk/git read, serialising every
+      # request and stalling device polling).  Falls back to Nodes#fetch when
+      # the object does not expose an output (e.g. in tests).
+      def fetch_config_for_search(node)
+        if node.respond_to?(:output) && node.respond_to?(:name)
+          output = node.output.new
+          return nil unless output.respond_to?(:fetch)
+
+          group = node.respond_to?(:group) ? node.group : nil
+          output.fetch(node, group)
+        else
+          name  = node_name_of(node)
+          group = if node.respond_to?(:group)
+                    node.group
+                  else
+                    (node.is_a?(Hash) ? node[:group] : nil)
+                  end
+          nodes.fetch(name, group)
+        end
+      rescue StandardError => e
+        logger.warn "conf_search: could not fetch config for #{node_name_of(node)}: #{e.class}: #{e.message}"
+        nil
+      end
+
+      # Regexp#match? guarded against encoding errors (configs may be binary or
+      # tagged with a non-UTF-8 encoding).
+      def config_matches?(regex, config)
+        return false if config.nil?
+
+        regex.match?(config)
+      rescue StandardError
+        begin
+          regex.match?(config.to_s.dup.force_encoding('UTF-8').scrub)
+        rescue StandardError
+          false
+        end
+      end
+
+      def node_name_of(node)
+        node.respond_to?(:name) ? node.name : node[:name]
+      end
+
+      def node_full_name_of(node)
+        if node.respond_to?(:name)
+          name  = node.name
+          group = node.respond_to?(:group) ? node.group : nil
+          group ? "#{group}/#{name}" : name
+        else
+          node[:full_name] || node[:name]
+        end
+      end
+
+      # Map over +items+ using a bounded pool of worker threads.  Order is
+      # preserved.  A block that raises leaves that slot nil rather than killing
+      # the whole map (callers compact the result).
+      def parallel_map(items, pool_size)
+        items = items.to_a
+        return [] if items.empty?
+
+        queue   = Queue.new
+        results = Array.new(items.size)
+        items.each_with_index { |item, i| queue << [item, i] }
+
+        workers = Array.new([pool_size, items.size].min) do
+          Thread.new do
+            loop do
+              item, i = queue.pop(true)
+              begin
+                results[i] = yield(item)
+              rescue StandardError => e
+                logger.warn "parallel_map worker error: #{e.class}: #{e.message}"
+                results[i] = nil
+              end
+            rescue ThreadError
+              break # queue empty
+            end
+          end
+        end
+        workers.each(&:join)
+        results
       end
 
       # checks if param ends with .json

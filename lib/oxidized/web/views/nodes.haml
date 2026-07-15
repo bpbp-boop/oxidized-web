@@ -1,6 +1,12 @@
 .row
   .col-4
-    %h4 nodes /
+    %h4
+      %a.link-body-emphasis.link-underline-opacity-0{href: url_for('/nodes')} nodes
+      - if @filter_type
+        \/ #{@filter_type}:
+        %b&= @filter_value
+      - else
+        \/
   .col-8
     %form.float-end#oxButtons
       %button.btn.btn-primary{type: 'button', onclick: 'history.go();'}
@@ -30,8 +36,8 @@
           %th Actions
 
       %tbody
-        - unless @server_side
-          - @data.sort_by{|e|e[:name]}.each do |node|
+        - if !@server_side && @data
+          - @data.sort_by { |e| e[:name].to_s }.each do |node|
             %tr
               %td
                 %a{href: url_for("/node/show/#{node[:name]}")} #{node[:name]}
@@ -59,10 +65,14 @@
                   %i.bi.bi-repeat
 
 :javascript
-  /* oxServerSide: true  → main /nodes page, data loaded via AJAX one page at a time
-   *               false → filtered views (/nodes/group/…, /nodes/model/…) with inline data */
+  /* oxServerSide: true  → data loaded via AJAX one page at a time.  This is used
+   *               for the main /nodes page as well as the /nodes/group/… and
+   *               /nodes/model/… filtered views, so none of them ever load the
+   *               whole host list into the browser.
+   *               false → inline data rendered server-side (fallback only). */
   var oxServerSide = #{@server_side ? 'true' : 'false'};
   var oxBaseUrl    = "#{url_for('/')}";
+  var oxAjaxUrl    = "#{nodes_datatables_url}";
 
   /* Minimal HTML-escape used inside JS-generated cell content */
   function oxEscHtml(str) {
@@ -82,17 +92,26 @@
     return dayjs.unix(epoch).local().format('YYYY-MM-DD HH:mm:ss [(UTC]Z[)]');
   }
 
+  /* Place the DataTables buttons (column visibility) into the custom button
+   * bar.  Runs on init: in server-side/AJAX mode the Buttons container is only
+   * populated after the first draw, so doing this synchronously right after
+   * .DataTable() – as before – left the colvis button missing. */
+  function oxPlaceButtons(api) {
+    api.buttons(0, 0).container().prependTo($('#oxButtons'));
+    api.buttons(0, 0).nodes().removeClass('btn-secondary');
+  }
+
   $(function() {
     var dtConfig = {
       columnDefs: [
         {
           /* Hide IP address by default */
-          target: 1,
+          targets: [1],
           visible: false,
         },
         {
           /* do not permit to hide Name and Actions */
-          targets: [0,7],
+          targets: [0, 7],
           className: 'noVis'
         },
       ],
@@ -103,8 +122,15 @@
           className: 'btn-primary',
         }],
       autoWidth: false,
-      lengthMenu: [20, 50, 250, 500, { label: 'All', value: -1 }],
+      lengthMenu: [20, 50, 250, 500],
       stateSave: true,
+      /* Don't let a stale saved state ask the server for every row */
+      stateLoadParams: function(settings, data) {
+        if (data.length === -1 || data.length > 500) { data.length = 20; }
+      },
+      initComplete: function() {
+        oxPlaceButtons(this.api());
+      },
     };
 
     if (oxServerSide) {
@@ -113,16 +139,17 @@
        * very large node lists (tens of thousands of hosts). */
       dtConfig.serverSide  = true;
       dtConfig.processing  = true;
-      dtConfig.ajax        = { url: oxBaseUrl + 'nodes/datatables' };
+      dtConfig.ajax        = { url: oxAjaxUrl };
       dtConfig.order       = [[0, 'asc']];
 
       /* Column definitions tell DataTables how to map the JSON fields returned
        * by /nodes/datatables to table cells, and how to render HTML content. */
       dtConfig.columns = [
-        /* 0 – Name */
+        /* 0 – Name (links to /node/show/<name>; the group is NOT part of this
+         *          route, so we must use the bare node name here) */
         { data: 'name', render: function(data, type, row) {
           if (type === 'display') {
-            return '<a href="' + oxBaseUrl + 'node/show/' + oxEscHtml(row.full_name) + '">'
+            return '<a href="' + oxBaseUrl + 'node/show/' + oxEscHtml(row.name) + '">'
                    + oxEscHtml(data) + '</a>';
           }
           return data;
@@ -137,7 +164,8 @@
           }
           return data;
         }},
-        /* 3 – Group */
+        /* 3 – Group (name may itself contain "/", which is significant for the
+         *          route, so it must NOT be percent-encoded here) */
         { data: 'group', render: function(data, type, row) {
           if (type === 'display') {
             return '<a href="' + oxBaseUrl + 'nodes/group/' + oxEscHtml(data) + '">'
@@ -167,6 +195,8 @@
         /* 7 – Actions (not sortable or searchable) */
         { data: null, orderable: false, searchable: false,
           render: function(data, type, row) {
+            /* full_name is "<group>/<name>"; the "/" is part of the route so
+             * we HTML-escape rather than percent-encode it */
             var fn = oxEscHtml(row.full_name);
             return '<a class="link-body-emphasis link-underline-opacity-0"'
                    + ' title="Configuration"'
@@ -188,9 +218,6 @@
     }
 
     var table = $('#nodesTable').DataTable(dtConfig);
-
-    table.buttons(0,0).container().prependTo($('#oxButtons'));
-    table.buttons(0,0).nodes().removeClass('btn-secondary');
 
     $('#resetSearch').on('click', function() {
         table.search('').draw();
