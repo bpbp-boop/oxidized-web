@@ -3,7 +3,10 @@
     %h4
       %a.link-body-emphasis.link-underline-opacity-0{href: url_for('/nodes')} nodes
       - if @filter_type
-        \/ #{@filter_type}:
+        \/
+        -# Haml runs with escape_html: false, so escape these explicitly (&=)
+        -# — both come straight from the request path.
+        &= "#{@filter_type}:"
         %b&= @filter_value
       - else
         \/

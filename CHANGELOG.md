@@ -24,6 +24,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Config search no longer returns a 500 error on an invalid regular expression,
   and a single node whose configuration cannot be read (missing, binary or an
   unsupported output) no longer aborts the whole search.
+- Escape the filter name shown in the nodes heading, closing a reflected-XSS
+  hole reachable via a crafted `/nodes/<filter>/…` URL.
 
 
 ## [0.18.1 – 2026-01-19]

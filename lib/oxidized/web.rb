@@ -105,7 +105,17 @@ module Oxidized
         @mutex.synchronize do
           if stale?
             logger.debug "Stats cache miss — recomputing (ttl=#{@ttl}s)"
-            @data       = @nodes.to_a.map { |node| self.class.build_row(node.name, node.stats) }
+            # The Stats objects are mutated in place by the polling thread
+            # (Stats#add), so a row can occasionally raise while a counter hash
+            # or history array is being modified concurrently.  Contain that to
+            # the affected node instead of failing the whole stats page; the
+            # next refresh will pick it up.
+            @data = @nodes.to_a.filter_map do |node|
+              self.class.build_row(node.name, node.stats)
+            rescue StandardError => e
+              logger.warn "Stats cache: skipping node during recompute: #{e.class}: #{e.message}"
+              nil
+            end
             @fetched_at = Time.now
           end
           @data

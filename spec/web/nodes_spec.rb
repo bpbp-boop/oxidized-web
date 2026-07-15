@@ -347,6 +347,14 @@ describe 'Oxidized::API::WebApp server-side views' do
     _(last_response.body).must_include 'nodes/datatables?model=ios'
   end
 
+  it 'HTML-escapes the filter type in the heading (no reflected XSS)' do
+    get '/nodes/XSStest%3Cscript%3E/foo'
+
+    _(last_response.ok?).must_equal true
+    _(last_response.body).wont_include 'XSStest<script>'
+    _(last_response.body).must_include 'XSStest&lt;script&gt;'
+  end
+
   it 'renders the stats view in server-side mode' do
     get '/nodes/stats'
 
