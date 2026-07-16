@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Server-side, paginated rendering for the group (`/nodes/group/…`), model
   (`/nodes/model/…`) and stats (`/nodes/stats`) views, so large deployments no
   longer load every host into the browser before falling back to pagination.
+- Show *why* a host is failing: hovering the "Last Status" indicator of a
+  failing node on the nodes table reveals the last error type and message
+  (e.g. `Net::SSH::AuthenticationFailed: Authentication failed`), read from the
+  node's `err_type` / `err_reason`.
 
 ### Changed
 - Config search reads node configurations concurrently, greatly reducing search

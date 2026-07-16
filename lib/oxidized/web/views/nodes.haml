@@ -176,11 +176,19 @@
           }
           return data;
         }},
-        /* 4 – Last Status */
+        /* 4 – Last Status. For a failing node the tooltip is enriched with the
+         *     reason the backup failed (err_type + err_reason), e.g.
+         *     "no_connection — Net::SSH::AuthenticationFailed: Authentication failed". */
         { data: 'status', render: function(data, type, row) {
           if (type === 'display') {
-            var s = oxEscHtml(data);
-            return '<div title="' + s + '" class="' + s + '">'
+            var s   = oxEscHtml(data);
+            var tip = data;
+            var help = '';
+            if (row.err_type) {
+              tip = data + ' — ' + row.err_type + (row.err_reason ? ': ' + row.err_reason : '');
+              help = ' style="cursor: help"';
+            }
+            return '<div title="' + oxEscHtml(tip) + '" class="' + s + '"' + help + '>'
                    + '<span style="visibility: hidden">' + s + '</span></div>';
           }
           return data;

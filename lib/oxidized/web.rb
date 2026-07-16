@@ -194,6 +194,69 @@ module Oxidized
       end
     end
 
+    # Thread-safe cache of the last error recorded for each node.
+    #
+    # The oxidized core stores the reason a backup failed on the live Node
+    # object as `err_type` (exception class, e.g. Net::SSH::AuthenticationFailed)
+    # and `err_reason` (the message).  These are not part of Node#serialize, so
+    # they never reach the web layer via Nodes#list.  This cache reads them
+    # directly off the node objects (no serialization, no global mutex) so the
+    # nodes table can explain *why* a host is failing.
+    #
+    # Only the last error is kept and it is never cleared on a subsequent
+    # success, so callers must only display it for nodes that are currently in a
+    # failing state.
+    class ErrorCache
+      include SemanticLogger::Loggable
+
+      DEFAULT_TTL = 10
+
+      def initialize(nodes, ttl: DEFAULT_TTL)
+        @nodes      = nodes
+        @ttl        = ttl
+        @mutex      = Mutex.new
+        @data       = nil
+        @fetched_at = Time.at(0)
+      end
+
+      # @return [Hash{String => {type: String, reason: String}}] keyed by node
+      #   name; only nodes that currently carry an error are present.
+      def map
+        @mutex.synchronize do
+          if stale?
+            @data       = build_map
+            @fetched_at = Time.now
+          end
+          @data
+        end
+      end
+
+      def invalidate!
+        @mutex.synchronize do
+          @data       = nil
+          @fetched_at = Time.at(0)
+        end
+      end
+
+      private
+
+      def build_map
+        @nodes.to_a.each_with_object({}) do |node, acc|
+          next unless node.respond_to?(:err_type)
+
+          type = node.err_type.to_s
+          next if type.empty?
+
+          reason = node.respond_to?(:err_reason) ? node.err_reason.to_s : ''
+          acc[node.name.to_s] = { type: type, reason: reason }
+        end
+      end
+
+      def stale?
+        @data.nil? || (Time.now - @fetched_at) > @ttl
+      end
+    end
+
     class Web
       include SemanticLogger::Loggable
 
@@ -222,10 +285,15 @@ module Oxidized
           nodes,
           ttl: @configuration[:node_cache_ttl]
         )
+        error_cache = ErrorCache.new(
+          nodes,
+          ttl: @configuration[:node_cache_ttl]
+        )
 
         WebApp.set :nodes,           nodes
         WebApp.set :node_list_cache, cache
         WebApp.set :stats_cache,     stats_cache
+        WebApp.set :error_cache,     error_cache
         WebApp.set :configuration,   @configuration
         WebApp.set :host_authorization, {
           permitted_hosts: @configuration[:vhosts]

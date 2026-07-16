@@ -88,11 +88,15 @@ module Oxidized
         # Paginate (length == -1 means "all records")
         page_data = dt[:length] == -1 ? sorted : (sorted.slice(dt[:start], dt[:length]) || [])
 
+        # The failure reason lives on the live node objects, not in the cached
+        # serialized list, so look it up separately and attach it to the page.
+        errors = error_cache.map
+
         json(
           draw: dt[:draw],
           recordsTotal: records_total,
           recordsFiltered: records_filtered,
-          data: page_data.map { |node| serialize_node_for_table(node) }
+          data: page_data.map { |node| serialize_node_for_table(node, errors) }
         )
       end
 
@@ -220,6 +224,7 @@ module Oxidized
         # Discard the cached data so the next request reflects the reload
         node_list_cache.invalidate!
         stats_cache.invalidate!
+        error_cache.invalidate!
         @data = node ? "reloaded #{node}" : 'reloaded list of nodes'
         out
       end
@@ -391,6 +396,10 @@ module Oxidized
         settings.stats_cache
       end
 
+      def error_cache
+        settings.error_cache
+      end
+
       # Extract and normalise the standard DataTables server-side parameters.
       def datatables_params
         {
@@ -424,17 +433,28 @@ module Oxidized
         end
       end
 
-      def serialize_node_for_table(node)
-        {
+      def serialize_node_for_table(node, errors = {})
+        status = node[:status].to_s
+        row = {
           name: node[:name].to_s,
           full_name: (node[:full_name] || node[:name]).to_s,
           ip: node[:ip].to_s,
           model: node[:model].to_s,
           group: node[:group].to_s,
-          status: node[:status].to_s,
+          status: status,
           time: node[:time].is_a?(Time) ? node[:time].to_i : 0,
           mtime: node[:mtime].is_a?(Time) ? node[:mtime].to_i : 0
         }
+
+        # Only surface the last error while the node is actually failing — the
+        # core never clears err_type on a later success, so showing it for a
+        # recovered node would be misleading.
+        if status == 'no_connection' && (err = errors[row[:name]])
+          row[:err_type]   = err[:type]
+          row[:err_reason] = err[:reason]
+        end
+
+        row
       end
 
       def serialize_stats_row(row)

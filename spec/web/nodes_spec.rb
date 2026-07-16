@@ -20,10 +20,14 @@ describe Oxidized::API::WebApp do
   before do
     @nodes = mock('Oxidized::Nodes')
     @nodes.expects(:list).returns(NODES_TEST_DATA.map(&:dup))
+    # The datatables endpoint also looks up per-node error info off the live
+    # node objects; none of the base fixtures carry an error.
+    @nodes.stubs(:to_a).returns([])
     app.set(:nodes, @nodes)
     # Wire a fresh cache for every test so datatables requests go through the
     # cache while still calling @nodes.list exactly once (on the cold miss).
     app.set(:node_list_cache, Oxidized::API::NodeListCache.new(@nodes))
+    app.set(:error_cache, Oxidized::API::ErrorCache.new(@nodes))
   end
 
   describe '/nodes.?:format?' do
@@ -320,6 +324,9 @@ FakeNodeObj = Struct.new(:name, :group, :stats, :output_class) do
   def output = output_class
 end
 
+# Node double carrying the error accessors the ErrorCache reads.
+ErrNodeObj = Struct.new(:name, :err_type, :err_reason)
+
 describe 'Oxidized::API::WebApp server-side views' do
   include Rack::Test::Methods
 
@@ -470,5 +477,83 @@ describe Oxidized::API::StatsCache do
     cache.rows # warm hit (no second to_a)
     cache.invalidate!
     cache.rows # recompute
+  end
+end
+
+DT_PARAMS = {
+  draw: '1', start: '0', length: '20',
+  'search[value]' => '', 'order[0][column]' => '0', 'order[0][dir]' => 'asc'
+}.freeze
+
+describe 'failure reason on the nodes table' do
+  include Rack::Test::Methods
+
+  def app
+    Oxidized::API::WebApp
+  end
+
+  before do
+    now = Time.now.utc
+    failing = { name: 'bad1', ip: '10.0.0.1', model: 'ios', mtime: 'mtime',
+                last: { start: now, end: now, status: :no_connection, time: 1.0 } }
+    ok = { name: 'ok1', ip: '10.0.0.2', model: 'ios', mtime: 'mtime',
+           last: { start: now, end: now, status: :success, time: 1.0 } }
+    @nodes = mock('Oxidized::Nodes')
+    @nodes.stubs(:list).returns([failing.dup, ok.dup])
+    # Both live nodes carry an err_type; ok1's is stale (it now succeeds).
+    @nodes.stubs(:to_a).returns([
+                                  ErrNodeObj.new('bad1', 'Net::SSH::AuthenticationFailed', 'Authentication failed'),
+                                  ErrNodeObj.new('ok1', 'Net::SSH::AuthenticationFailed', 'stale error')
+                                ])
+    app.set(:nodes, @nodes)
+    app.set(:node_list_cache, Oxidized::API::NodeListCache.new(@nodes))
+    app.set(:error_cache, Oxidized::API::ErrorCache.new(@nodes))
+  end
+
+  it 'includes err_type/err_reason for a currently-failing node' do
+    get '/nodes/datatables', DT_PARAMS.dup
+
+    result = JSON.parse(last_response.body)
+    row = result['data'].find { |r| r['name'] == 'bad1' }
+    _(row['status']).must_equal 'no_connection'
+    _(row['err_type']).must_equal 'Net::SSH::AuthenticationFailed'
+    _(row['err_reason']).must_equal 'Authentication failed'
+  end
+
+  it 'does not surface a stale error for a node that now succeeds' do
+    get '/nodes/datatables', DT_PARAMS.dup
+
+    result = JSON.parse(last_response.body)
+    row = result['data'].find { |r| r['name'] == 'ok1' }
+    _(row['status']).must_equal 'success'
+    _(row.has_key?('err_type')).must_equal false
+  end
+end
+
+describe Oxidized::API::ErrorCache do
+  it 'maps only nodes that currently carry an error' do
+    nodes = mock('Oxidized::Nodes')
+    nodes.stubs(:to_a).returns([
+                                 ErrNodeObj.new('a', 'Net::SSH::AuthenticationFailed', 'auth failed'),
+                                 ErrNodeObj.new('b', nil, nil),
+                                 ErrNodeObj.new('c', '', '')
+                               ])
+    cache = Oxidized::API::ErrorCache.new(nodes, ttl: 60)
+
+    result = cache.map
+    _(result.keys).must_equal ['a']
+    _(result['a'][:type]).must_equal 'Net::SSH::AuthenticationFailed'
+    _(result['a'][:reason]).must_equal 'auth failed'
+  end
+
+  it 'caches until invalidated' do
+    nodes = mock('Oxidized::Nodes')
+    nodes.expects(:to_a).twice.returns([])
+    cache = Oxidized::API::ErrorCache.new(nodes, ttl: 60)
+
+    cache.map # cold miss
+    cache.map # warm hit (no second to_a)
+    cache.invalidate!
+    cache.map # recompute
   end
 end
