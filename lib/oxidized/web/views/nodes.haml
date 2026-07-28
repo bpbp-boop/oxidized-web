@@ -1,6 +1,15 @@
 .row
   .col-4
-    %h4 nodes /
+    %h4
+      %a.link-body-emphasis.link-underline-opacity-0{href: url_for('/nodes')} nodes
+      - if @filter_type
+        \/
+        -# Haml runs with escape_html: false, so escape these explicitly (&=)
+        -# — both come straight from the request path.
+        &= "#{@filter_type}:"
+        %b&= @filter_value
+      - else
+        \/
   .col-8
     %form.float-end#oxButtons
       %button.btn.btn-primary{type: 'button', onclick: 'history.go();'}
@@ -30,45 +39,82 @@
           %th Actions
 
       %tbody
-        - @data.sort_by{|e|e[:name]}.each do |node|
-          %tr
-            %td
-              %a{href: url_for("/node/show/#{node[:name]}")} #{node[:name]}
-            %td= node[:ip]
-            %td
-              %a{href: url_for("/nodes/model/#{node[:model]}")} #{node[:model]}
-            %td
-              %a{href: url_for("/nodes/group/#{node[:group]}")} #{node[:group]}
-            %td
-              %div{title: node[:status], class: node[:status]}
-                %span{style: 'visibility: hidden'}#{node[:status]}
-            %td.time{ epoch: node[:time].to_i }= node[:time]
-            %td.time{ epoch: node[:mtime].to_i }= node[:mtime]
-            %td
-              %a.link-body-emphasis.link-underline-opacity-0{title: 'Configuration',
-                  href: url_for("/node/fetch/#{node[:full_name]}")}
-                %i.bi.bi-cloud-download
-              &nbsp;&nbsp;
-              %a.link-body-emphasis.link-underline-opacity-0{title: 'Versions',
-                href: url_for("/node/version?node_full=#{node[:full_name]}")}
-                %i.bi.bi-stack
-              &nbsp;&nbsp;
-              %a.link-body-emphasis.link-underline-opacity-0{title: 'Update configuration',
-                href: url_for("/node/next/#{node[:full_name]}")}
-                %i.bi.bi-repeat
+        - if !@server_side && @data
+          - @data.sort_by { |e| e[:name].to_s }.each do |node|
+            %tr
+              %td
+                %a{href: url_for("/node/show/#{node[:name]}")} #{node[:name]}
+              %td= node[:ip]
+              %td
+                %a{href: url_for("/nodes/model/#{node[:model]}")} #{node[:model]}
+              %td
+                %a{href: url_for("/nodes/group/#{node[:group]}")} #{node[:group]}
+              %td
+                %div{title: node[:status], class: node[:status]}
+                  %span{style: 'visibility: hidden'}#{node[:status]}
+              %td.time{ epoch: node[:time].to_i }= node[:time]
+              %td.time{ epoch: node[:mtime].to_i }= node[:mtime]
+              %td
+                %a.link-body-emphasis.link-underline-opacity-0{title: 'Configuration',
+                    href: url_for("/node/fetch/#{node[:full_name]}")}
+                  %i.bi.bi-cloud-download
+                &nbsp;&nbsp;
+                %a.link-body-emphasis.link-underline-opacity-0{title: 'Versions',
+                  href: url_for("/node/version?node_full=#{node[:full_name]}")}
+                  %i.bi.bi-stack
+                &nbsp;&nbsp;
+                %a.link-body-emphasis.link-underline-opacity-0{title: 'Update configuration',
+                  href: url_for("/node/next/#{node[:full_name]}")}
+                  %i.bi.bi-repeat
 
 :javascript
+  /* oxServerSide: true  → data loaded via AJAX one page at a time.  This is used
+   *               for the main /nodes page as well as the /nodes/group/… and
+   *               /nodes/model/… filtered views, so none of them ever load the
+   *               whole host list into the browser.
+   *               false → inline data rendered server-side (fallback only). */
+  var oxServerSide = #{@server_side ? 'true' : 'false'};
+  var oxBaseUrl    = "#{url_for('/')}";
+  var oxAjaxUrl    = "#{nodes_datatables_url}";
+
+  /* Minimal HTML-escape used inside JS-generated cell content */
+  function oxEscHtml(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  /* Format a Unix epoch (integer seconds) to a human-readable local time,
+   * matching the format used by the server-rendered view. */
+  function oxFmtEpoch(epoch) {
+    if (!epoch || epoch === 0) return 'never';
+    return dayjs.unix(epoch).local().format('YYYY-MM-DD HH:mm:ss [(UTC]Z[)]');
+  }
+
+  /* Place the DataTables buttons (column visibility) into the custom button
+   * bar.  Runs on init: in server-side/AJAX mode the Buttons container is only
+   * populated after the first draw, so doing this synchronously right after
+   * .DataTable() – as before – left the colvis button missing. */
+  function oxPlaceButtons(api) {
+    api.buttons(0, 0).container().prependTo($('#oxButtons'));
+    api.buttons(0, 0).nodes().removeClass('btn-secondary');
+  }
+
   $(function() {
-    var table = $('#nodesTable').DataTable(Object.assign({
+    var dtConfig = {
       columnDefs: [
         {
           /* Hide IP address by default */
-          target: 1,
+          targets: [1],
           visible: false,
         },
         {
           /* do not permit to hide Name and Actions */
-          targets: [0,7],
+          targets: [0, 7],
           className: 'noVis'
         },
       ],
@@ -79,15 +125,117 @@
           className: 'btn-primary',
         }],
       autoWidth: false,
-      lengthMenu: [20, 50, 250, 500, { label: 'All', value: -1 }],
-    }, dataTableStateOptions('nodesTable')));
+      lengthMenu: [20, 50, 250, 500],
+      /* Don't let a stale saved state ask the server for every row */
+      stateLoadParams: function(settings, data) {
+        if (data.length === -1 || data.length > 500) { data.length = 20; }
+      },
+      initComplete: function() {
+        oxPlaceButtons(this.api());
+      },
+    };
 
-    table.buttons(0,0).container().prependTo($('#oxButtons'));
-    table.buttons(0,0).nodes().removeClass('btn-secondary');
+    if (oxServerSide) {
+      /* Switch DataTables to server-side processing: only one page of records
+       * is sent over the wire per request, making the page fast even for
+       * very large node lists (tens of thousands of hosts). */
+      dtConfig.serverSide  = true;
+      dtConfig.processing  = true;
+      dtConfig.ajax        = { url: oxAjaxUrl };
+      dtConfig.order       = [[0, 'asc']];
+
+      /* Column definitions tell DataTables how to map the JSON fields returned
+       * by /nodes/datatables to table cells, and how to render HTML content. */
+      dtConfig.columns = [
+        /* 0 – Name (links to /node/show/<name>; the group is NOT part of this
+         *          route, so we must use the bare node name here) */
+        { data: 'name', render: function(data, type, row) {
+          if (type === 'display') {
+            return '<a href="' + oxBaseUrl + 'node/show/' + oxEscHtml(row.name) + '">'
+                   + oxEscHtml(data) + '</a>';
+          }
+          return data;
+        }},
+        /* 1 – IP */
+        { data: 'ip' },
+        /* 2 – Model */
+        { data: 'model', render: function(data, type, row) {
+          if (type === 'display') {
+            return '<a href="' + oxBaseUrl + 'nodes/model/' + oxEscHtml(data) + '">'
+                   + oxEscHtml(data) + '</a>';
+          }
+          return data;
+        }},
+        /* 3 – Group (name may itself contain "/", which is significant for the
+         *          route, so it must NOT be percent-encoded here) */
+        { data: 'group', render: function(data, type, row) {
+          if (type === 'display') {
+            return '<a href="' + oxBaseUrl + 'nodes/group/' + oxEscHtml(data) + '">'
+                   + oxEscHtml(data) + '</a>';
+          }
+          return data;
+        }},
+        /* 4 – Last Status. For a failing node the tooltip is enriched with the
+         *     reason the backup failed (err_type + err_reason), e.g.
+         *     "no_connection — Net::SSH::AuthenticationFailed: Authentication failed". */
+        { data: 'status', render: function(data, type, row) {
+          if (type === 'display') {
+            var s   = oxEscHtml(data);
+            var tip = data;
+            var help = '';
+            if (row.err_type) {
+              tip = data + ' — ' + row.err_type + (row.err_reason ? ': ' + row.err_reason : '');
+              help = ' style="cursor: help"';
+            }
+            return '<div title="' + oxEscHtml(tip) + '" class="' + s + '"' + help + '>'
+                   + '<span style="visibility: hidden">' + s + '</span></div>';
+          }
+          return data;
+        }},
+        /* 5 – Last Update */
+        { data: 'time', render: function(data, type, row) {
+          if (type === 'display') return oxFmtEpoch(data);
+          return data;
+        }},
+        /* 6 – Last Changed */
+        { data: 'mtime', render: function(data, type, row) {
+          if (type === 'display') return oxFmtEpoch(data);
+          return data;
+        }},
+        /* 7 – Actions (not sortable or searchable) */
+        { data: null, orderable: false, searchable: false,
+          render: function(data, type, row) {
+            /* full_name is "<group>/<name>". For the path-based fetch/next
+             * routes the "/" is a real separator, so we only HTML-escape it.
+             * For the version link the value goes into a query-string param, so
+             * it must be percent-encoded (otherwise a "&" in the name would
+             * truncate node_full). */
+            var fnPath  = oxEscHtml(row.full_name);
+            var fnQuery = encodeURIComponent(row.full_name);
+            return '<a class="link-body-emphasis link-underline-opacity-0"'
+                   + ' title="Configuration"'
+                   + ' href="' + oxBaseUrl + 'node/fetch/' + fnPath + '">'
+                   + '<i class="bi bi-cloud-download"></i></a>'
+                   + '&nbsp;&nbsp;'
+                   + '<a class="link-body-emphasis link-underline-opacity-0"'
+                   + ' title="Versions"'
+                   + ' href="' + oxBaseUrl + 'node/version?node_full=' + fnQuery + '">'
+                   + '<i class="bi bi-stack"></i></a>'
+                   + '&nbsp;&nbsp;'
+                   + '<a class="link-body-emphasis link-underline-opacity-0"'
+                   + ' title="Update configuration"'
+                   + ' href="' + oxBaseUrl + 'node/next/' + fnPath + '">'
+                   + '<i class="bi bi-repeat"></i></a>';
+          }
+        },
+      ];
+    }
+
+    var table = $('#nodesTable').DataTable(
+      Object.assign(dtConfig, dataTableStateOptions('nodesTable'))
+    );
 
     $('#resetSearch').on('click', function() {
         table.search('').draw();
     });
   });
-
-

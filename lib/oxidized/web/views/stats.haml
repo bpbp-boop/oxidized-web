@@ -1,7 +1,7 @@
 .row
   .col-4
     %h4
-      %a{href: url_for('/nodes')} nodes
+      %a.link-body-emphasis.link-underline-opacity-0{href: url_for('/nodes')} nodes
       \/ stats
   .col-8
     %form.float-end#oxButtons
@@ -15,7 +15,6 @@
 .row
   .table-responsive
     %table.table.table-sm.table-striped.table-hover#statsTable
-
       %thead
         %tr
           %th Name
@@ -28,75 +27,81 @@
           %th Last Failure
 
       %tbody
-        - @data.map do |node, stats|
-          - status = 'no_connection'
-          - successes = stats.successes
-          - failures = stats.failures
-          - avg_success_time = 0
-          - avg_failure_time = 0
-          - avg_time = 0
-          - row_class = ''
-
-          - if success = stats.get(:success)
-            - last_success = success.last[:end]
-            - avg_success_time = success.collect {|x| x[:time]}
-            - avg_success_time = avg_success_time.inject {|sum, x| sum + x}
-            - avg_success_time /= successes
-
-          - if no_connection = stats.get(:no_connection)
-            - last_failure = no_connection.last[:end]
-            - avg_failure_time = no_connection.collect {|x| x[:time]}
-            - avg_failure_time = avg_failure_time.inject {|sum, x| sum + x}
-            - avg_failure_time /= failures
-
-          - if avg_success_time > 0 && avg_failure_time > 0
-            - avg_time = (avg_success_time + avg_failure_time) / 2
-          - elsif avg_success_time > 0
-            - avg_time = avg_success_time
-          - elsif avg_failure_time > 0
-            - avg_time = avg_failure_time
-          - avg_time = "#{'%.2f' % avg_time}" unless avg_time == 'Unknown'
-
-          - if last_success && last_failure
-            - status = last_success > last_failure ? 'success' : 'no_connection'
-          - elsif last_success
-            - status = 'success'
-            - last_failure = 'never'
-          - else
-            - last_success = 'never'
-
-          - total_runs = successes + failures
-          - failure_rate = (failures / total_runs.to_f) * 100
-          - row_class = 'warning' if failure_rate >= 50
-          - row_class = 'danger' if failure_rate >= 75
-
-          %tr{class: row_class}
-            %td= node
-            %td= total_runs
-            %td= failures
-            %td #{'%.2f' % failure_rate}%
-            %td #{'%.2f' % avg_time}
-            %td
-              %div{title: status, class: status}
-                %span{style: 'visibility: hidden'}#{status}
-            %td.time{ epoch: last_success.to_i }= last_success
-            %td.time{ epoch: last_failure.to_i }= last_failure
 
 :javascript
+  var oxBaseUrl = "#{url_for('/')}";
+
+  function oxEscHtml(str) {
+    if (str == null) return '';
+    return String(str)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function oxFmtEpoch(epoch) {
+    if (!epoch || epoch === 0) return 'never';
+    return dayjs.unix(epoch).local().format('YYYY-MM-DD HH:mm:ss [(UTC]Z[)]');
+  }
+
+  function oxPlaceButtons(api) {
+    api.buttons(0, 0).container().prependTo($('#oxButtons'));
+    api.buttons(0, 0).nodes().removeClass('btn-secondary');
+  }
+
   $(function() {
     var table = $('#statsTable').DataTable(Object.assign({
+      serverSide: true,
+      processing: true,
+      ajax: { url: oxBaseUrl + 'nodes/stats/datatables' },
+      order: [[0, 'asc']],
       columnDefs: [
         {
-          /* Hide IP address by default */
-          target: 1,
-          visible: false,
-        },
-        {
           /* do not permit to hide Name and Last Status */
-          targets: [0,5],
+          targets: [0, 5],
           className: 'noVis'
         },
       ],
+      columns: [
+        /* 0 – Name */
+        { data: 'name', render: function(data, type) {
+          return type === 'display' ? oxEscHtml(data) : data;
+        }},
+        /* 1 – Total Runs */
+        { data: 'total_runs' },
+        /* 2 – Total Failures */
+        { data: 'failures' },
+        /* 3 – Failure Rate */
+        { data: 'failure_rate', render: function(data, type) {
+          return type === 'display' ? Number(data).toFixed(2) + '%' : data;
+        }},
+        /* 4 – Average Run Time */
+        { data: 'avg_time', render: function(data, type) {
+          return type === 'display' ? Number(data).toFixed(2) : data;
+        }},
+        /* 5 – Last Status */
+        { data: 'status', render: function(data, type) {
+          if (type === 'display') {
+            var s = oxEscHtml(data);
+            return '<div title="' + s + '" class="' + s + '">'
+                   + '<span style="visibility: hidden">' + s + '</span></div>';
+          }
+          return data;
+        }},
+        /* 6 – Last Update (last successful run) */
+        { data: 'last_success', render: function(data, type) {
+          return type === 'display' ? oxFmtEpoch(data) : data;
+        }},
+        /* 7 – Last Failure */
+        { data: 'last_failure', render: function(data, type) {
+          return type === 'display' ? oxFmtEpoch(data) : data;
+        }},
+      ],
+      createdRow: function(row, data) {
+        if (data.row_class) { $(row).addClass(data.row_class); }
+      },
       buttons:
         [{
           extend: 'colvis',
@@ -104,11 +109,14 @@
           className: 'btn-primary',
         }],
       autoWidth: false,
-      lengthMenu: [20, 50, 250, 500, { label: 'All', value: -1 }],
+      lengthMenu: [20, 50, 250, 500],
+      stateLoadParams: function(settings, data) {
+        if (data.length === -1 || data.length > 500) { data.length = 20; }
+      },
+      initComplete: function() {
+        oxPlaceButtons(this.api());
+      },
     }, dataTableStateOptions('statsTable')));
-
-    table.buttons(0,0).container().prependTo($('#oxButtons'));
-    table.buttons(0,0).nodes().removeClass('btn-secondary');
 
     $('#resetSearch').on('click', function() {
         table.search('').draw();

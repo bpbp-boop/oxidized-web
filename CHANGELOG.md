@@ -10,12 +10,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   line numbers and the match highlighted (@bpbp-boop)
 - Search form on the results page, with an option to search for literal text
   instead of a regular expression (@bpbp-boop)
+- Server-side, paginated rendering for the main nodes (`/nodes`), group
+  (`/nodes/group/…`), model (`/nodes/model/…`) and stats (`/nodes/stats`) views,
+  so large deployments no longer load every host into the browser before
+  falling back to pagination.
+- Show *why* a host is failing: hovering the "Last Status" indicator of a
+  failing node on the nodes table reveals the last error type and message
+  (e.g. `Net::SSH::AuthenticationFailed: Authentication failed`), read from the
+  node's `err_type` / `err_reason`.
 
 ### Changed
+- Config search uses a bounded, configurable worker pool for output backends
+  that explicitly support parallel reads. Searches are globally serialized,
+  while GitCrypt and unknown/custom outputs remain serial to avoid repository
+  lock races. Configuration reads no longer hold the global nodes lock.
 
 ### Fixed
 - Config search returns 400 on an invalid regular expression instead of
   crashing (@bpbp-boop)
+- Config search limits each regular-expression scan to two seconds, preventing
+  pathological expressions from indefinitely occupying Puma workers.
+- Restore the column-visibility toggle button on the server-side nodes table
+  (it was missing because the button was placed before DataTables had finished
+  its first AJAX draw).
+- Fix the node name link on the nodes table pointing to the non-existent
+  `/node/show/<group>/<node>` route; it now links to `/node/show/<node>`.
+- Config search no longer returns a 500 error on an invalid regular expression,
+  and a single node whose configuration cannot be read (missing, binary or an
+  unsupported output) no longer aborts the whole search.
+- Escape the filter name shown in the nodes heading, closing a reflected-XSS
+  hole reachable via a crafted `/nodes/<filter>/…` URL.
 
 
 ## [0.18.1 – 2026-01-19]

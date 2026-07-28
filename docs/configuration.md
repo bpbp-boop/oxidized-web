@@ -23,6 +23,15 @@ You can set the following parameter:
 - `url_prefix`: Defines a URL prefix (default: no prefix)
 - `vhosts`: A list of virtual hosts to listen to. If not specified, it will
   respond to any virtual host.
+- `node_cache_ttl`: Number of seconds to cache the serialized node list and
+  derived statistics (default: `10`).
+- `min_threads`: Minimum number of Puma request threads (default: `1`).
+- `max_threads`: Maximum number of Puma request threads (default: `8`).
+- `conf_search_threads`: Maximum number of configuration-fetch workers used by
+  one config search (default: `4`, allowed range: `1`–`16`). Searches are
+  globally serialized. Git and file outputs use the worker pool; GitCrypt and
+  unknown/custom outputs remain serial unless a custom output explicitly
+  declares parallel fetching safe.
 
 ## Examples
 
