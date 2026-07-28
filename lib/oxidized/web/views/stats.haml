@@ -84,7 +84,7 @@
 
 :javascript
   $(function() {
-    var table = $('#statsTable').DataTable({
+    var table = $('#statsTable').DataTable(Object.assign({
       columnDefs: [
         {
           /* Hide IP address by default */
@@ -105,8 +105,7 @@
         }],
       autoWidth: false,
       lengthMenu: [20, 50, 250, 500, { label: 'All', value: -1 }],
-      stateSave: true,
-    });
+    }, dataTableStateOptions('statsTable')));
 
     table.buttons(0,0).container().prependTo($('#oxButtons'));
     table.buttons(0,0).nodes().removeClass('btn-secondary');
